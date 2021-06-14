@@ -34,7 +34,7 @@ from timm.data import create_dataset, create_loader, resolve_data_config, Mixup,
 from timm.models import create_model, safe_model_name, resume_checkpoint, load_checkpoint,\
     convert_splitbn_model, model_parameters
 from timm.utils import *
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
+from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy, L2SP
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 from timm.utils import ApexScaler, NativeScaler
@@ -123,6 +123,10 @@ parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
                     help='Clip gradient norm (default: None, no clipping)')
 parser.add_argument('--clip-mode', type=str, default='norm',
                     help='Gradient clipping mode. One of ("norm", "value", "agc")')
+parser.add_argument('--L2SP', action='store_true', default=False,
+                    help='Use L2SP weight decay')
+parser.add_argument('--L2SP_rates', nargs='+', type=float, default=0.01, metavar='LR',
+                    help='L2SP_rates (default: 0.01)')
 
 
 # Learning rate schedule parameters
@@ -565,6 +569,19 @@ def main():
             checkpoint_dir=output_dir, recovery_dir=output_dir, decreasing=decreasing, max_history=args.checkpoint_hist)
         with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
             f.write(args_text)
+        w0_dict = None
+        if args.L2SP:
+            w0_dict = {}
+            # Extract the intitial weights transferred from ImageNet
+            for name, w in model.named_parameters():
+                # if 'weight' not in name:  # I don't know if that is true: I was told that Facebook regularized biases too.
+                #    continue
+                # if 'downsample.1' in name:  # another bias
+                # continue
+                if 'bn' in name:  # bn parameters
+                    continue
+                else:
+                    w0_dict[name] = w.clone()
 
     try:
 
@@ -578,7 +595,9 @@ def main():
             train_metrics = train_one_epoch(
                 epoch, model, loader_train, optimizer, train_loss_fn, args,
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
-                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn)
+                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn,
+                w0_dict=w0_dict, new_layers=args.new_layers, num_lowlrs=args.num_lowlrs
+            )
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if args.local_rank == 0:
@@ -622,7 +641,8 @@ def main():
 def train_one_epoch(
         epoch, model, loader, optimizer, loss_fn, args,
         lr_scheduler=None, saver=None, output_dir='', amp_autocast=suppress,
-        loss_scaler=None, model_ema=None, mixup_fn=None):
+        loss_scaler=None, model_ema=None, mixup_fn=None,
+        w0_dict=None, new_layers=0, num_lowlrs=0):
 
     if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
         if args.prefetcher and loader.mixup_enabled:
@@ -653,6 +673,9 @@ def train_one_epoch(
         with amp_autocast():
             output, hidden = model(input)
             loss = loss_fn(output, target)
+            if args.L2SP:
+                l2_reg = L2SP(model, w0_dict, new_layers, num_lowlrs)
+                loss += l2_reg
 
         # save hidden states
         # if not os.path.exists(os.path.join(output_dir, "hiddenmap")):
