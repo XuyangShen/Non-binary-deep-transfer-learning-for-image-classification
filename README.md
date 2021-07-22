@@ -1,6 +1,6 @@
 # Non-binary deep transfer learning for image classification
 
-This repository is the official implementation of [Non-binary deep transfer learning for image classification](). 
+This repository is the official implementation of [Non-binary deep transfer learning for image classification](https://arxiv.org/pdf/2107.08585.pdf). 
 
 ```python
 __version__ = '0.1.0'
